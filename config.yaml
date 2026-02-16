@@ -1,0 +1,31 @@
+server:
+  listen: 8080
+  workers: 4
+  upstreams:
+    - id: upstream1
+      url: http://jsonplaceholder.typicode.com
+
+    - id: dummy
+      url: http://dummyjson.com
+
+
+  headers:
+    - key: x-forward-for
+      value: '$ip'
+
+    - key: Authorization
+      value: 'Bearer xyz'
+
+
+
+  rules:
+    - path: /test
+      upstreams:
+        - dummy
+    - path: /
+      upstreams:
+        - upstream1
+
+    
+
+        
