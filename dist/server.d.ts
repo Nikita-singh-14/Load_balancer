@@ -4,6 +4,6 @@ interface CreateServerConfig {
     workerCount: number;
     config: ConfigSchemaType;
 }
-export declare function createServer(config: CreateServerConfig): Promise<void>;
+export declare function createServer(configInput: CreateServerConfig): Promise<void>;
 export {};
 //# sourceMappingURL=server.d.ts.map

@@ -1,9 +1,14 @@
-import { type ConfigSchemaType, rootConfigSchema } from "./configSchema.js";
 import cluster, { Worker } from "node:cluster";
 import http from "node:http";
-import { workerMessageSchema, type WorkerMessageType } from "./serverSchema.js";
+import https from "node:https";
+import { URL } from "node:url";
+import crypto from "node:crypto";
+
+import { rootConfigSchema, type ConfigSchemaType } from "./configSchema.js";
 import {
+  workerMessageSchema,
   workerMessageReplySchema,
+  type WorkerMessageType,
   type WorkerMessageReplyType,
 } from "./serverSchema.js";
 
@@ -13,104 +18,140 @@ interface CreateServerConfig {
   config: ConfigSchemaType;
 }
 
-export async function createServer(config: CreateServerConfig) {
-  const { workerCount, port } = config;
+export async function createServer(configInput: CreateServerConfig) {
+  const { workerCount, port } = configInput;
   const WORKER_POOL: Worker[] = [];
 
+  /* ===========================
+     MASTER PROCESS
+     =========================== */
   if (cluster.isPrimary) {
-    console.log("Master process is up");
+    console.log("Master process started");
 
     for (let i = 0; i < workerCount; i++) {
-      const w = cluster.fork({ config: JSON.stringify(config.config) });
-      WORKER_POOL.push(w);
-      console.log(`Master Process: Worker Node Spinned ${i}`);
+      const worker = cluster.fork({
+        config: JSON.stringify(configInput.config),
+      });
+      WORKER_POOL.push(worker);
+      console.log(`Worker ${i} started`);
     }
 
     const server = http.createServer((req, res) => {
-      const index = Math.floor(Math.random() * WORKER_POOL.length);
-      const worker = WORKER_POOL.at(index);
+      const worker =
+        WORKER_POOL[Math.floor(Math.random() * WORKER_POOL.length)];
 
-      if (!worker) throw new Error("Worker not found");
+      if (!worker) {
+        res.writeHead(500);
+        return res.end("No worker available");
+      }
+
+      const requestId = crypto.randomUUID();
 
       const payload: WorkerMessageType = {
+        requestId,
         requestType: "HTTP",
         headers: req.headers,
         body: null,
-        url: `${req.url}`,
+        url: req.url ?? "/",
       };
 
       worker.send(JSON.stringify(payload));
 
-      worker.once("message", async (workerReply) => {
-        if (res.headersSent) return;
+      const timeout = setTimeout(() => {
+        worker.off("message", onMessage);
+        res.writeHead(504);
+        res.end("Upstream timeout");
+      }, 5000);
 
-        const reply = await workerMessageReplySchema.parseAsync(
-          JSON.parse(workerReply)
+      const onMessage = (message: string) => {
+        const reply = workerMessageReplySchema.parse(
+          JSON.parse(message.toString())
         );
 
-        if (reply.errorCode) {
-          res.writeHead(Number(reply.errorCode));
-          res.end(reply.error);
-        } else {
-          res.writeHead(200);
-          res.end(reply.data);
-        }
-      });
+        if (reply.requestId !== requestId) return;
+
+        clearTimeout(timeout);
+        worker.off("message", onMessage);
+
+        const status =
+          reply.statusCode ??
+          (reply.errorCode ? Number(reply.errorCode) : 200);
+
+        res.writeHead(status);
+        res.end(reply.data ?? reply.error ?? "");
+      };
+
+      worker.on("message", onMessage);
     });
 
     server.listen(port, () => {
-      console.log(`Reverse Proxy listening on PORT ${port}`);
+      console.log(`Reverse proxy listening on port ${port}`);
     });
-  } else {
-    console.log("Worker Node");
+  }
+
+  /* ===========================
+     WORKER PROCESS
+     =========================== */
+  else {
+    console.log("Worker process running");
 
     const config = await rootConfigSchema.parseAsync(
-      JSON.parse(`${process.env.config}`)
+      JSON.parse(process.env.config ?? "{}")
     );
 
     process.on("message", async (message: string) => {
-      const messageValidated = await workerMessageSchema.parseAsync(
-        JSON.parse(message)
-      );
+      const msg = await workerMessageSchema.parseAsync(JSON.parse(message));
 
-      const requestURL = messageValidated.url;
-      const rule = config.server.rules.find((e) => {
-        // If path is "/", match everything
-        if (e.path === "/") {
-          return /^\/.*$/.test(requestURL);
-        }
+      const requestURL = msg.url;
 
-        // Otherwise match exact path or subpaths
-        const regex = new RegExp(`^${e.path}(\/.*)?$`);
-        return regex.test(requestURL);
-      });
+      // Match specific paths first, "/" last
+      const rule =
+        config.server.rules.find(
+          (r) => r.path !== "/" && requestURL.startsWith(r.path)
+        ) ??
+        config.server.rules.find((r) => r.path === "/");
 
       if (!rule) {
-        const reply: WorkerMessageReplyType = {
-          errorCode: "404",
-          error: "Rule not found",
-        };
-        return process.send?.(JSON.stringify(reply));
+        return process.send?.(
+          JSON.stringify({
+            requestId: msg.requestId,
+            errorCode: "404",
+            error: "Rule not found",
+          })
+        );
       }
 
-      const upstreamID = rule.upstreams[0];
       const upstream = config.server.upstreams.find(
-        (e) => e.id === upstreamID
+        (u) => u.id === rule.upstreams[0]
       );
 
-      if (!upstreamID || !upstream) {
-        const reply: WorkerMessageReplyType = {
-          errorCode: "500",
-          error: "upstream not found",
-        };
-        return process.send?.(JSON.stringify(reply));
+      if (!upstream) {
+        return process.send?.(
+          JSON.stringify({
+            requestId: msg.requestId,
+            errorCode: "500",
+            error: "Upstream not found",
+          })
+        );
       }
 
-      const request = http.request(
+      const target = new URL(upstream.url);
+      const client = target.protocol === "https:" ? https : http;
+
+      // Remove hop-by-hop headers
+      const headers = { ...msg.headers };
+      delete headers.host;
+      delete headers.connection;
+      delete headers["content-length"];
+      delete headers["transfer-encoding"];
+
+      const proxyReq = client.request(
         {
-          hostname: upstream?.url,
+          hostname: target.hostname,
+          port: target.port || (target.protocol === "https:" ? 443 : 80),
           path: requestURL,
           method: "GET",
+          headers,
         },
         (proxyRes) => {
           let body = "";
@@ -120,15 +161,32 @@ export async function createServer(config: CreateServerConfig) {
           });
 
           proxyRes.on("end", () => {
-            const reply: WorkerMessageReplyType = {
-              data: body,
-            };
-            process.send?.(JSON.stringify(reply));
+            process.send?.(
+              JSON.stringify({
+                requestId: msg.requestId,
+                statusCode: proxyRes.statusCode,
+                data: body,
+              })
+            );
           });
         }
       );
 
-      request.end();
+      proxyReq.on("error", (err) => {
+        process.send?.(
+          JSON.stringify({
+            requestId: msg.requestId,
+            errorCode: "502",
+            error: err.message,
+          })
+        );
+      });
+
+      proxyReq.setTimeout(5000, () => {
+        proxyReq.destroy();
+      });
+
+      proxyReq.end();
     });
   }
 }

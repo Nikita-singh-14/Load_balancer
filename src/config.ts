@@ -1,4 +1,3 @@
-
 import fs from 'node:fs/promises';
 import { parse } from 'yaml';
 import {rootConfigSchema} from './configSchema.js';
