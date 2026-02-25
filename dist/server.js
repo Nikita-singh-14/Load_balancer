@@ -3,14 +3,11 @@ import http from "node:http";
 import https from "node:https";
 import { URL } from "node:url";
 import crypto from "node:crypto";
-import { rootConfigSchema } from "./configSchema.js";
-import { workerMessageSchema, workerMessageReplySchema, } from "./serverSchema.js";
+import { rootConfigSchema } from "./schema/configSchema.js";
+import { workerMessageSchema, workerMessageReplySchema, } from "./schema/serverSchema.js";
 export async function createServer(configInput) {
     const { workerCount, port } = configInput;
     const WORKER_POOL = [];
-    /* ===========================
-       MASTER PROCESS
-       =========================== */
     if (cluster.isPrimary) {
         console.log("Master process started");
         for (let i = 0; i < workerCount; i++) {
@@ -48,25 +45,28 @@ export async function createServer(configInput) {
                 worker.off("message", onMessage);
                 const status = reply.statusCode ??
                     (reply.errorCode ? Number(reply.errorCode) : 200);
-                res.writeHead(status);
-                res.end(reply.data ?? reply.error ?? "");
+                res.writeHead(status, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    response: reply.data ?? reply.error,
+                    handledBy: {
+                        workerId: reply.workerId,
+                        pid: reply.pid,
+                    },
+                }));
             };
-            worker.on("message", onMessage);
+            worker.once("message", onMessage);
         });
         server.listen(port, () => {
             console.log(`Reverse proxy listening on port ${port}`);
         });
     }
-    /* ===========================
-       WORKER PROCESS
-       =========================== */
     else {
         console.log("Worker process running");
         const config = await rootConfigSchema.parseAsync(JSON.parse(process.env.config ?? "{}"));
         process.on("message", async (message) => {
             const msg = await workerMessageSchema.parseAsync(JSON.parse(message));
             const requestURL = msg.url;
-            // Match specific paths first, "/" last
+            console.log(`Worker ${cluster.worker?.id} (PID ${process.pid}) handled ${msg.url} | ${msg.requestId}`);
             const rule = config.server.rules.find((r) => r.path !== "/" && requestURL.startsWith(r.path)) ??
                 config.server.rules.find((r) => r.path === "/");
             if (!rule) {
@@ -86,7 +86,6 @@ export async function createServer(configInput) {
             }
             const target = new URL(upstream.url);
             const client = target.protocol === "https:" ? https : http;
-            // Remove hop-by-hop headers
             const headers = { ...msg.headers };
             delete headers.host;
             delete headers.connection;
@@ -108,6 +107,8 @@ export async function createServer(configInput) {
                         requestId: msg.requestId,
                         statusCode: proxyRes.statusCode,
                         data: body,
+                        workerId: cluster.worker?.id,
+                        pid: process.pid,
                     }));
                 });
             });

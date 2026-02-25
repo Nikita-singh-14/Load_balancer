@@ -15,6 +15,8 @@ export const workerMessageReplySchema = z.object({
     error: z.string().optional(),
     errorCode: z.enum(['500', '502','404']).optional(),
     statusCode: z.number().optional(), 
+    workerId: z.number().optional(),
+    pid: z.number().optional(),
 });
 
 export type WorkerMessageType = z.infer<typeof workerMessageSchema>;

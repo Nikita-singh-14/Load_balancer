@@ -19,8 +19,8 @@ server:
     - key: X-Forwarded-For
       value: '$ip'
 
-   # - key: Authorization
-    #  value: 'Bearer xyz'
+    - key: Authorization
+      value: 'Bearer xyz'
 
 
 

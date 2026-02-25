@@ -1,4 +1,4 @@
-import { type ConfigSchemaType } from "./configSchema.js";
+import { type ConfigSchemaType } from "./schema/configSchema.js";
 interface CreateServerConfig {
     port: number;
     workerCount: number;

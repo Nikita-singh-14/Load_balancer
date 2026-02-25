@@ -4,13 +4,13 @@ import https from "node:https";
 import { URL } from "node:url";
 import crypto from "node:crypto";
 
-import { rootConfigSchema, type ConfigSchemaType } from "./configSchema.js";
+import { rootConfigSchema, type ConfigSchemaType } from "./schema/configSchema.js";
 import {
   workerMessageSchema,
   workerMessageReplySchema,
   type WorkerMessageType,
   type WorkerMessageReplyType,
-} from "./serverSchema.js";
+} from "./schema/serverSchema.js";
 
 interface CreateServerConfig {
   port: number;
@@ -22,9 +22,7 @@ export async function createServer(configInput: CreateServerConfig) {
   const { workerCount, port } = configInput;
   const WORKER_POOL: Worker[] = [];
 
-  /* ===========================
-     MASTER PROCESS
-     =========================== */
+
   if (cluster.isPrimary) {
     console.log("Master process started");
 
@@ -77,11 +75,21 @@ export async function createServer(configInput: CreateServerConfig) {
           reply.statusCode ??
           (reply.errorCode ? Number(reply.errorCode) : 200);
 
-        res.writeHead(status);
-        res.end(reply.data ?? reply.error ?? "");
+
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            response: reply.data ?? reply.error,
+            handledBy: {
+              workerId: reply.workerId,
+              pid: reply.pid,
+            },
+          })
+        );
       };
 
-      worker.on("message", onMessage);
+      worker.once("message", onMessage);
+
     });
 
     server.listen(port, () => {
@@ -89,9 +97,6 @@ export async function createServer(configInput: CreateServerConfig) {
     });
   }
 
-  /* ===========================
-     WORKER PROCESS
-     =========================== */
   else {
     console.log("Worker process running");
 
@@ -100,11 +105,16 @@ export async function createServer(configInput: CreateServerConfig) {
     );
 
     process.on("message", async (message: string) => {
+
       const msg = await workerMessageSchema.parseAsync(JSON.parse(message));
 
       const requestURL = msg.url;
+     
+      console.log(
+        `Worker ${cluster.worker?.id} (PID ${process.pid}) handled ${msg.url} | ${msg.requestId}`
+      );
 
-      // Match specific paths first, "/" last
+
       const rule =
         config.server.rules.find(
           (r) => r.path !== "/" && requestURL.startsWith(r.path)
@@ -138,7 +148,7 @@ export async function createServer(configInput: CreateServerConfig) {
       const target = new URL(upstream.url);
       const client = target.protocol === "https:" ? https : http;
 
-      // Remove hop-by-hop headers
+
       const headers = { ...msg.headers };
       delete headers.host;
       delete headers.connection;
@@ -166,6 +176,8 @@ export async function createServer(configInput: CreateServerConfig) {
                 requestId: msg.requestId,
                 statusCode: proxyRes.statusCode,
                 data: body,
+                workerId: cluster.worker?.id,
+                pid: process.pid,
               })
             );
           });
