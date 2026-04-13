@@ -1,0 +1,12 @@
+# env files
+.env
+.env.*
+
+# specific path (extra safety)
+RateLimiter/.env
+
+# node modules
+node_modules/
+
+# build files
+dist/
