@@ -1,11 +1,17 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import dotenv from "dotenv";
+import redis from "../helpers/redis";
 import path from "path";
 
 dotenv.config({ path: path.join(__dirname, "../config/.env") });
 
 const MAX_BUCKET_SIZE = 4.5 * 1024 * 1024 * 1024; // 4.5 GB in bytes
+
+//new line
+if (!process.env.ACCESS_KEY || !process.env.SECRET_ACCESS_KEY || !process.env.S3_BUCKET) {
+  throw new Error("Missing AWS environment variables");
+}
 
 const s3Client = new S3Client({
   region: "ap-south-1",
@@ -16,31 +22,32 @@ const s3Client = new S3Client({
 });
 
 // function to get the current size of the S3 bucket
-const getBucketSize = async (bucketName: string) => {
-  let totalSize = 0;
-  let continuationToken: string | undefined;
 
-  try {
-    do {
-      const command = new ListObjectsV2Command({
-        Bucket: bucketName,
-        ContinuationToken: continuationToken,
-      });
+//const getBucketSize = async (bucketName: string) => {
+  //let totalSize = 0;
+  //let continuationToken: string | undefined;
 
-      const response = await s3Client.send(command);
-      if (response.Contents) {
-        totalSize += response.Contents.reduce((acc, obj) => acc + (obj.Size || 0), 0);
-      }
+  //try {
+    //do {
+      //const command = new ListObjectsV2Command({
+        //Bucket: bucketName,
+        //ContinuationToken: continuationToken,
+      //});
 
-      continuationToken = response.NextContinuationToken;
-    } while (continuationToken);
-  } catch (error) {
-    console.error("Error fetching S3 bucket size:", error);
-    throw new Error("Unable to fetch bucket size.");
-  }
+      //const response = await s3Client.send(command);
+      //if (response.Contents) {
+        //totalSize += response.Contents.reduce((acc, obj) => acc + (obj.Size || 0), 0);
+      //}
 
-  return totalSize;
-};
+      //continuationToken = response.NextContinuationToken;
+    //} while (continuationToken);
+  //} catch (error) {
+    //console.error("Error fetching S3 bucket size:", error);
+    //throw new Error("Unable to fetch bucket size.");
+  //}
+
+  //return totalSize;
+//};
 
 const uploadToS3 = async (
   fileContent: Buffer | string,
@@ -50,12 +57,14 @@ const uploadToS3 = async (
   projectTitle: string,
 ) => {
   try {
-    const bucketName = process.env.S3_BUCKET;
+    const bucketName = process.env.S3_BUCKET as string;
+    // Get current size from Redis
+    const currentSize = Number(await redis.get("bucket_size")) || 0;
     if (!bucketName) {
       throw new Error("Please provide a bucket name");
     }
 
-    const currentSize = await getBucketSize(bucketName);
+    //const currentSize = await getBucketSize(bucketName);
 
     // if size exceeds 4.5 GB
     if (currentSize >= MAX_BUCKET_SIZE) {
@@ -73,11 +82,18 @@ const uploadToS3 = async (
 
     await s3Client.send(command);
 
+    // Update size in Redis (approx size)
+    const fileSize = typeof fileContent === "string"
+      ? Buffer.byteLength(fileContent)
+      : fileContent.length;
+
+    await redis.incrby("bucket_size", fileSize);
+
     // Generating signed url
     const signedUrl = await getSignedUrl(
       s3Client,
       new GetObjectCommand({ Bucket: bucketName, Key: fileKey }),
-      { expiresIn: 7 * 24 * 60 },
+      { expiresIn: 7 * 24 * 60 * 60},
     );
 
     console.log("Upload successful:", signedUrl);

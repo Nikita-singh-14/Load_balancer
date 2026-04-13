@@ -1,4 +1,4 @@
-exports.hideIp = (ip) => {
+export const hideIp = (ip: string): string => {
     const octects = ip.split(".");
     if(octects.length !== 4) return ip; //only IPv4 handled
 
